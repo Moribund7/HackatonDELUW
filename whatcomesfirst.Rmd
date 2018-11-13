@@ -1,0 +1,139 @@
+---
+title: "What comes first"
+author: "Maria Khachatryan, Marta Kołczyńska, Filip Kowalski, Jakub Siwiec, Paweł Zawadzki"
+date: "11/12/2018"
+output: html_document
+---
+
+```{r setup, warning=FALSE, message=FALSE, echo = FALSE}
+library(tidyverse)
+library(gtrendsR)
+library(lubridate)
+library(data.table)
+library(zoo)
+library(stats)
+library(plotly)
+
+tech_news <- read.csv("tech_one_word.csv",
+                          stringsAsFactors = FALSE) %>%
+  gather(date, occnews, 2:33) %>%
+  rename(keyword = X) %>%
+  mutate(date = gsub('X', '', date),
+         date = paste(date, ".01", sep = ""),
+         date = ymd(date))
+
+csv_dir_tech <- "engineroom-data-sprint-notebooks/03-wikipedia-article-metrics/results/tech"
+csv_lst_tech <- file.path(csv_dir_tech, list.files(csv_dir_tech))  # list of all files in the selected directory
+csv_lst_tech <- csv_lst_tech[grep(".csv", csv_lst_tech)]  # make sure only .csv files
+techtabs = lapply(csv_lst_tech, function(x) read.csv(x, stringsAsFactors = FALSE, encoding = "UTF-8"))
+
+clean_wiki <- function(inname, tab) {
+  
+  inname[[tab]] %>% 
+    gather(month, valname, 5:ncol(inname[[tab]])) %>%
+    mutate(month = gsub('X', '', month),
+           date = paste(month, "01", sep = ""),
+           date = ymd(date)) %>%
+    filter(lang %in% c("en")) %>%
+    select(name, date, valname)
+}
+
+techedits <- clean_wiki(techtabs, 1) %>% rename(medits = valname)
+techreverts <- clean_wiki(techtabs, 5) %>% rename(mreverts = valname)
+techpageviews <- clean_wiki(techtabs, 8) %>% rename(mpageviews = valname)
+tech_wiki <- full_join(techedits, techreverts) %>%
+  full_join(., techpageviews) %>%
+  mutate(name = tolower(name)) %>%
+  filter(name %in% unique(tech_news$keyword))
+
+### Google trends data
+
+techlist <- unique(tech_news$keyword) %>% gsub('_', ' ', .)
+tech_google_list <- list()
+
+for (i in 1:length(techlist)) {
+  tech_google_list[[i]] <- gtrends(c(techlist[i]), time = "all", gprop = "web")
+}
+
+tech_google <- do.call(rbind, lapply(tech_google_list, function (x) x[[1]])) %>%
+  mutate(hits = ifelse(hits == "<1", 0, hits),
+         hits = as.numeric(hits))
+
+tech_google$keyword <- gsub(' ', '_', tech_google$keyword)
+
+### Merging all data
+
+tech_wiki_google_news <- full_join(tech_google, tech_wiki, by = c("date", "keyword" = "name")) %>%
+  mutate(views_per_edit = ifelse(medits >0, mpageviews / medits, NA)) %>%
+  group_by(keyword) %>%
+  mutate(hits_3m = rollmean(hits, 3, align = "center", fill = NA),
+         medits_3m = rollmean(medits, 3, align = "center", fill = NA),
+         mreverts_3m = rollmean(mreverts, 3, align = "center", fill = NA)) %>%
+  ungroup() %>%
+  mutate(keyword = tolower(keyword)) %>%
+  full_join(tech_news) %>%
+  select(-category, -views_per_edit, -geo, -gprop) %>%
+  mutate(occnews_3m = rollmean(occnews, 3, align = "center", fill = NA)) %>%
+  select(3,1,2,4,5,6,10,7,8,9,11)
+
+```
+
+### Line graphs
+
+
+```{r graph-wireless, warning=FALSE, message=FALSE, echo = FALSE, fig.width = 8, fig.height = 4}
+cols <- c("Google hits"="gold","Wiki edits"="chartreuse3","Wiki page views"="blue4", "News" = "indianred2")
+
+word <- "wireless"
+tech_wiki_google_news %>%
+  filter(keyword == word, date > "2016-01-01") %>%
+  ggplot(data = .) +
+  geom_line(aes(x = date, y = as.numeric(hits), col = "Google hits"), size = 1.5) + 
+  geom_line(aes(x = date, y = medits, col = "Wiki edits"), size = 1.5) +
+  geom_line(aes(x = date, y = mpageviews/100, col = "Wiki page views"), size = 1.5) +
+  geom_line(aes(x = date, y = occnews * 1000, col = "News"), size = 1.5) +
+  scale_colour_manual(name="Legend",values=cols) +
+  ylab("") + xlab("") + ggtitle(paste("Keyword: ", word, sep= ""))
+```
+
+
+```{r graph-cyberattack, warning=FALSE, message=FALSE, echo = FALSE, fig.width = 8, fig.height = 4}
+word <- "cyberattack"
+tech_wiki_google_news %>%
+  filter(keyword == word, date > "2016-01-01") %>%
+  ggplot(data = .) +
+  geom_line(aes(x = date, y = as.numeric(hits), col = "Google hits"), size = 1.5) + 
+  geom_line(aes(x = date, y = medits, col = "Wiki edits"), size = 1.5) +
+  geom_line(aes(x = date, y = mpageviews/100, col = "Wiki page views"), size = 1.5) +
+  geom_line(aes(x = date, y = occnews * 1000, col = "News"), size = 1.5) +
+  scale_colour_manual(name="Legend",values=cols) +
+  ylab("") + xlab("") + ggtitle(paste("Keyword: ", word, sep= ""))
+```
+
+### Plotly
+
+Bubbles
+
+```{r graph-bubbles, warning=FALSE, message=FALSE, echo = FALSE, fig.width = 8, fig.height = 4}
+tech_wiki_google_news_nomiss <- tech_wiki_google_news %>% 
+  select(date, keyword, occnews, mpageviews, medits) %>%
+  filter(!is.na(occnews) & !is.na(mpageviews) & !is.na(medits)) %>%
+  group_by(keyword) %>%
+  mutate(cum_occnews = cumsum(occnews),
+         cum_mpageviews = cumsum(mpageviews),
+         cum_medits = cumsum(medits))
+
+p <- tech_wiki_google_news_nomiss %>%
+  mutate(date = substr(as.character(date),1,7)) %>%
+  ggplot(., aes(x = cum_occnews, y = cum_mpageviews/1000000, col = keyword, size = cum_medits)) +
+  geom_point(aes(frame = date)) +
+  geom_text(aes(frame = date, label=keyword), size = 4, hjust = 0, nudge_x = 1, nudge_y = 1) +
+  theme(legend.position="none") +
+  theme(legend.position="none") +
+  xlab("Cumulative news occurrences") +
+  ylab("Cumulative Wikipedia page views (mln)")
+  
+
+ggplotly(p)
+```
+
